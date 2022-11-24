@@ -1,64 +1,150 @@
-const fs = require("fs")
-const express = require("express")
-const bodyParser = require("body-parser")
-const jwt = require("jsonwebtoken")
+const fs = require("fs");
+const express = require("express");
+const bodyParser = require("body-parser");
+const url = require("url");
+const jwt = require("jsonwebtoken");
 const {
-	randomString,
-	containsAll,
-	decodeAuthCredentials,
-	timeout,
-} = require("./utils")
+  randomString,
+  containsAll,
+  decodeAuthCredentials,
+  timeout,
+} = require("./utils");
 
 const config = {
-	port: 9001,
-	privateKey: fs.readFileSync("assets/private_key.pem"),
+  port: 9001,
+  privateKey: fs.readFileSync("assets/private_key.pem"),
 
-	clientId: "my-client",
-	clientSecret: "zETqHgl0d7ThysUqPnaFuLOmG1E=",
-	redirectUri: "http://localhost:9000/callback",
+  clientId: "my-client",
+  clientSecret: "zETqHgl0d7ThysUqPnaFuLOmG1E=",
+  redirectUri: "http://localhost:9000/callback",
 
-	authorizationEndpoint: "http://localhost:9001/authorize",
-}
+  authorizationEndpoint: "http://localhost:9001/authorize",
+};
 
 const clients = {
-	"my-client": {
-		name: "Sample Client",
-		clientSecret: "zETqHgl0d7ThysUqPnaFuLOmG1E=",
-		scopes: ["permission:name", "permission:date_of_birth"],
-	},
-	"test-client": {
-		name: "Test Client",
-		clientSecret: "TestSecret",
-		scopes: ["permission:name"],
-	},
-}
+  "my-client": {
+    name: "Sample Client",
+    clientSecret: "zETqHgl0d7ThysUqPnaFuLOmG1E=",
+    scopes: ["permission:name", "permission:date_of_birth"],
+  },
+  "test-client": {
+    name: "Test Client",
+    clientSecret: "TestSecret",
+    scopes: ["permission:name"],
+  },
+};
 
 const users = {
-	user1: "password1",
-	john: "appleseed",
-}
+  user1: "password1",
+  john: "appleseed",
+};
 
-const requests = {}
-const authorizationCodes = {}
+const requests = {};
+const authorizationCodes = {};
 
-let state = ""
+let state = "";
 
-const app = express()
-app.set("view engine", "ejs")
-app.set("views", "assets/authorization-server")
-app.use(timeout)
-app.use(bodyParser.json())
-app.use(bodyParser.urlencoded({ extended: true }))
+const app = express();
+app.set("view engine", "ejs");
+app.set("views", "assets/authorization-server");
+app.use(timeout);
+app.use(bodyParser.json());
+app.use(bodyParser.urlencoded({ extended: true }));
 
 /*
 Your code here
 */
 
+app.get("/authorize", (req, res) => {
+  const { client_id: clientID, scope } = req.query;
+  const client = clients[clientID];
+
+  if (!client) {
+    res.status(401).send("Error: client not authorized");
+    return;
+  }
+  const scopesAllowed = client.scopes;
+  const scopesRequested = scope.split(" ");
+
+  const validScopes = containsAll(scopesAllowed, scopesRequested);
+  if (typeof scope !== "string" || !validScopes) {
+    res.status(401).send("Error: invalid scopes requested");
+    return;
+  }
+  const requestId = randomString();
+  requests[requestId] = req.query;
+
+  res.render("login", { client, scope, requestId });
+});
+
+app.post("/approve", (req, res) => {
+  const { userName, password, requestId } = req.body;
+  if (!userName || users[userName] !== password) {
+    res.status(401).send("Error: user not authorized");
+    return;
+  }
+  const clientReq = requests[requestId];
+  if (!clientReq) {
+    res.status(401).send("Error: invalid user request");
+    return;
+  }
+
+  delete requests[requestId];
+  const code = randomString();
+  authorizationCodes[code] = { clientReq, userName };
+  const redirectUri = url.parse(clientReq.redirect_uri);
+  redirectUri.query = {
+    code,
+    state: clientReq.state,
+  };
+  res.redirect(url.format(redirectUri));
+});
+
+app.post("/token", (req, res) => {
+  let authCredentials = req.headers.authorization;
+  if (!authCredentials) {
+    res.status(401).send("Error: not authorized");
+    return;
+  }
+  const { clientId, clientSecret } = decodeAuthCredentials(authCredentials);
+  const client = clients[clientId];
+  if (!client || client.clientSecret !== clientSecret) {
+    res.status(401).send("Error: client not authorized");
+    return;
+  }
+
+  const code = req.body.code;
+  if (!code || !authorizationCodes[code]) {
+    res.status(401).send("Error: invalid code");
+    return;
+  }
+  const { clientReq, userName } = authorizationCodes[code];
+  delete authorizationCodes[code];
+
+  const token = jwt.sign(
+    {
+      userName,
+      scope: clientReq.scope,
+    },
+    config.privateKey,
+    {
+      algorithm: "RS256",
+      expiresIn: 300,
+      issuer: "http://localhost:" + config.port,
+    }
+  );
+  res.json({
+    access_token: token,
+    token_type: "Bearer",
+    scope: clientReq.scope,
+  });
+});
+
 const server = app.listen(config.port, "localhost", function () {
-	var host = server.address().address
-	var port = server.address().port
-})
+  var host = server.address().address;
+  var port = server.address().port;
+});
 
 // for testing purposes
 
-module.exports = { app, requests, authorizationCodes, server }
+module.exports = { app, requests, authorizationCodes, server };
